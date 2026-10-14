@@ -206,8 +206,10 @@
   </div>
   <div class="row">
     <label class="slider">Stars <input id="rate" type="range" min="1" max="10" value="4"></label>
+    <label class="slider">Speed <input id="speed" type="range" min="0.5" max="2" step="0.1" value="1"></label>
     <button class="chip" id="mood">Mood: Calm</button>
     <button class="chip" id="shower" title="Shortcut: S">Star shower</button>
+    <button class="chip" id="bounce" aria-pressed="true" title="Shortcut: B">Bounce</button>
     <button class="chip" id="rec" title="Shortcut: R">Record</button>
     <button class="chip" id="undo" title="Shortcut: Z">Undo</button>
     <button class="chip" id="clear">Clear</button>
@@ -222,7 +224,7 @@
     <h2>Night Vines</h2>
     <p id="introText">Draw vines across the sky. Every star that lands on one plays a note.</p>
     <button class="go" id="start">Start</button>
-    <p class="keys"><kbd>S</kbd> star shower &nbsp; <kbd>R</kbd> record a loop &nbsp; <kbd>Z</kbd> undo</p>
+    <p class="keys"><kbd>S</kbd> star shower &nbsp; <kbd>R</kbd> record a loop &nbsp; <kbd>Z</kbd> undo &nbsp; <kbd>B</kbd> bounce</p>
   </div>
 </div>
 
@@ -260,6 +262,9 @@
   const rings = [];
   let drawing = null;
   let showerLeft = 0, showerT = 0;
+  let bounce = true;
+  let speed = 1;
+  const MAX_BOUNCES = 5;
 
   // loop recorder
   let recState = 'idle';   // idle | rec | loop
@@ -406,7 +411,7 @@
   function save() {
     try {
       const data = {
-        w: W, h: H, current, moodIdx, starRate,
+        w: W, h: H, current, moodIdx, starRate, bounce, speed,
         vines: vines.map((v) => ({
           type: v.type,
           pts: v.pts.map((p) => [Math.round(p.x), Math.round(p.y)]),
@@ -435,6 +440,8 @@
       if (TYPES[d.current]) current = d.current;
       if (MOODS[d.moodIdx]) moodIdx = d.moodIdx;
       if (d.starRate >= 1 && d.starRate <= 10) starRate = d.starRate;
+      bounce = d.bounce !== false;
+      if (d.speed >= 0.5 && d.speed <= 2) speed = d.speed;
       return true;
     } catch (e) { return false; }
   }
@@ -448,7 +455,11 @@
       vx: (Math.random() - 0.5) * 14,
       vy: (90 + Math.random() * 80) * Math.min(1, H / 700 + 0.35),
       r: 3.2 + Math.random() * 2.2,
-      trail: []
+      trail: [],
+      bounces: 0,
+      cool: 0,
+      lastVine: null,
+      falling: false
     });
   }
 
@@ -464,6 +475,7 @@
   function hitTest(s) {
     const reach = s.r + 7;
     for (const v of vines) {
+      if (s.cool > 0 && v === s.lastVine) continue;
       const pts = v.pts;
       for (let i = 0; i < pts.length; i++) {
         const p = pts[i];
@@ -480,7 +492,7 @@
     const { v, i, p } = hit;
     const idx = Math.max(0, Math.min(NOTES_ACROSS - 1, Math.floor((p.x / W) * NOTES_ACROSS)));
     const f = noteFreq(idx);
-    const vel = 0.65 + ((s.r - 3.2) / 2.2) * 0.35;
+    const vel = (0.65 + ((s.r - 3.2) / 2.2) * 0.35) * Math.pow(0.85, s.bounces || 0);
     playNote(v.type, f, vel);
     for (let j = Math.max(0, i - 11); j <= Math.min(v.pts.length - 1, i + 11); j++) {
       const g = 1 - Math.abs(j - i) / 12;
@@ -488,6 +500,35 @@
     }
     burst(p.rx, p.ry, TYPES[v.type].color, 9);
     if (recState === 'rec') recEvents.push({ t: recT, type: v.type, f, vel, x: p.x, y: p.y });
+  }
+
+  /* ---------- Bouncing ---------- */
+  function bounceOff(s, hit) {
+    const { v, i, p } = hit;
+    const pts = v.pts;
+    const a = pts[Math.max(0, i - 2)];
+    const b = pts[Math.min(pts.length - 1, i + 2)];
+    let tx = b.x - a.x, ty = b.y - a.y;
+    const tl = Math.hypot(tx, ty) || 1;
+    tx /= tl; ty /= tl;
+    let nx = -ty, ny = tx;
+    // point the normal toward the side the star is on
+    if (nx * (s.x - p.x) + ny * (s.y - p.y) < 0) { nx = -nx; ny = -ny; }
+    const dot = s.vx * nx + s.vy * ny;
+    let vx = s.vx, vy = s.vy;
+    if (dot < 0) { vx -= 2 * dot * nx; vy -= 2 * dot * ny; }
+    vx = vx * 0.8 + (Math.random() - 0.5) * 30;
+    vy = vy * 0.8;
+    const sp = Math.hypot(vx, vy) || 1;
+    const minSp = 170;
+    if (sp < minSp) { vx = vx / sp * minSp; vy = vy / sp * minSp; }
+    s.vx = vx; s.vy = vy;
+    s.x = p.x + nx * (s.r + 8);
+    s.y = p.y + ny * (s.r + 8);
+    s.bounces++;
+    s.cool = 0.18;
+    s.lastVine = v;
+    s.falling = true;
   }
 
   /* ---------- Loop recorder ---------- */
@@ -576,11 +617,24 @@
       const s = stars[k];
       s.trail.push(s.x, s.y);
       if (s.trail.length > 20) s.trail.splice(0, 2);
-      s.x += s.vx * dt;
-      s.y += s.vy * dt;
-      const hit = hitTest(s);
-      if (hit) { onHit(s, hit); stars.splice(k, 1); continue; }
-      if (s.y > H + 20) stars.splice(k, 1);
+      // Move in small steps so fast stars can't skip past a vine.
+      const sdt = dt * speed;
+      const n = Math.max(1, Math.ceil((Math.hypot(s.vx, s.vy) * sdt) / 5));
+      const h = sdt / n;
+      let dead = false;
+      for (let step = 0; step < n; step++) {
+        if (s.falling) s.vy += 300 * h;
+        if (s.cool > 0) s.cool -= h;
+        s.x += s.vx * h;
+        s.y += s.vy * h;
+        const hit = hitTest(s);
+        if (hit) {
+          onHit(s, hit);
+          if (bounce && s.bounces < MAX_BOUNCES) bounceOff(s, hit);
+          else { dead = true; break; }
+        }
+      }
+      if (dead || s.y > H + 20 || s.x < -30 || s.x > W + 30) stars.splice(k, 1);
     }
 
     const t = now / 1000;
@@ -835,11 +889,14 @@
   /* ---------- Controls ---------- */
   const moodBtn = document.getElementById('mood');
   const rateInput = document.getElementById('rate');
+  const speedInput = document.getElementById('speed');
 
   function syncUI() {
     document.querySelectorAll('[data-type]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.type === current)));
     moodBtn.textContent = 'Mood: ' + MOODS[moodIdx].name;
     rateInput.value = starRate;
+    bounceBtn.setAttribute('aria-pressed', String(bounce));
+    speedInput.value = speed;
   }
 
   function startShower() { initAudio(); showerLeft += 26; }
@@ -850,8 +907,13 @@
   });
   rateInput.addEventListener('input', (e) => { starRate = +e.target.value; });
   rateInput.addEventListener('change', save);
+  speedInput.addEventListener('input', (e) => { speed = +e.target.value; });
+  speedInput.addEventListener('change', save);
   moodBtn.addEventListener('click', () => { moodIdx = (moodIdx + 1) % MOODS.length; syncUI(); save(); });
   document.getElementById('shower').addEventListener('click', startShower);
+  const bounceBtn = document.getElementById('bounce');
+  function toggleBounce() { bounce = !bounce; syncUI(); save(); }
+  bounceBtn.addEventListener('click', toggleBounce);
   recBtn.addEventListener('click', toggleRec);
   document.getElementById('undo').addEventListener('click', undo);
   document.getElementById('clear').addEventListener('click', () => { vines.length = 0; save(); });
@@ -891,6 +953,7 @@
     if (k === 's') startShower();
     else if (k === 'r') toggleRec();
     else if (k === 'z') undo();
+    else if (k === 'b') toggleBounce();
   });
 
   window.addEventListener('resize', resize);
